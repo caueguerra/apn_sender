@@ -1,6 +1,7 @@
 require 'socket'
 require 'openssl'
 require 'resque'
+require 'connection_pool'
 
 module APN
   module Connection
@@ -8,7 +9,7 @@ module APN
     # responsibilities so APN::Sender and APN::Feedback and focus on their respective specialties.
     module Base
       attr_accessor :opts, :logger
-      
+
       def initialize(opts = {})
         @opts = opts
 
@@ -18,15 +19,15 @@ module APN
 
         super( APN::QUEUE_NAME ) if self.class.ancestors.include?(Resque::Worker)
       end
-      
+
       # Lazy-connect the socket once we try to access it in some way
       def socket
         setup_connection unless @socket
         return @socket
       end
-            
+
       protected
-      
+
       # Default to Rails or Merg logger, if available
       def setup_logger
         @logger = if defined?(Merb::Logger)
@@ -36,7 +37,7 @@ module APN
         end
         @logger ||= Logger.new(STDOUT)
       end
-      
+
       # Log message to any logger provided by the user (e.g. the Rails logger).
       # Accepts +log_level+, +message+, since that seems to make the most sense,
       # and just +message+, to be compatible with Resque's log method and to enable
@@ -77,32 +78,36 @@ module APN
 
           File.join(@opts[:cert_path], @opts[:cert_name])
         end
-        
+
         @apn_cert = File.read(cert_path) if File.exists?(cert_path)
         log_and_die("Please specify correct :full_cert_path. No apple push notification certificate found in: #{cert_path}") unless @apn_cert
       end
-      
+
       # Open socket to Apple's servers
       def setup_connection
-        log_and_die("Missing apple push notification certificate") unless @apn_cert
-        return true if @socket && @socket_tcp
-        log_and_die("Trying to open half-open connection") if @socket || @socket_tcp
+        @socket = ::ConnectionPool::Wrapper.new(:size => 1, :timeout => 5) do
+          begin
+            log_and_die("Missing apple push notification certificate") unless @apn_cert
 
-        ctx = OpenSSL::SSL::SSLContext.new
-        ctx.cert = OpenSSL::X509::Certificate.new(@apn_cert)
-        
-        if @opts[:cert_pass]
-          ctx.key = OpenSSL::PKey::RSA.new(@apn_cert, @opts[:cert_pass])
-        else
-          ctx.key = OpenSSL::PKey::RSA.new(@apn_cert)
+            ctx = OpenSSL::SSL::SSLContext.new
+            ctx.cert = OpenSSL::X509::Certificate.new(@apn_cert)
+
+            if @opts[:cert_pass]
+              ctx.key = OpenSSL::PKey::RSA.new(@apn_cert, @opts[:cert_pass])
+            else
+              ctx.key = OpenSSL::PKey::RSA.new(@apn_cert)
+            end
+
+            @socket_tcp = TCPSocket.new(apn_host, apn_port)
+            socket = OpenSSL::SSL::SSLSocket.new(@socket_tcp, ctx)
+            socket.sync = true
+            socket.connect
+            socket
+          rescue SocketError => error
+            log_and_die("Error with connection to #{apn_host}: #{error}")
+            nil
+          end
         end
-
-        @socket_tcp = TCPSocket.new(apn_host, apn_port)
-        @socket = OpenSSL::SSL::SSLSocket.new(@socket_tcp, ctx)
-        @socket.sync = true
-        @socket.connect
-      rescue SocketError => error
-        log_and_die("Error with connection to #{apn_host}: #{error}")
       end
 
       # Close open sockets
@@ -110,7 +115,9 @@ module APN
         log(:info, "Closing connections...") if @opts[:verbose]
 
         begin
-          @socket.close if @socket
+          @socket.with do |socket|
+            socket.close if socket
+          end
         rescue Exception => e
           log(:error, "Error closing SSL Socket: #{e}")
         end

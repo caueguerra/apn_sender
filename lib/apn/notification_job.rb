@@ -10,15 +10,7 @@ module APN
     def self.perform(token, opts)
       msg = APN::Notification.new(token, opts)
       raise "Invalid notification options (did you provide :alert, :badge, or :sound?): #{opts.inspect}" unless msg.valid?
-
-      raise "APN::NotificationJob was picked up by a non-APN:Sender resque worker. Aborting." unless worker
-      worker.send_to_apple(msg)
+      APN::Sender.new.send_to_apple(msg)
     end
-
-
-    # Only execute this job in specialized APN::Sender workers, since
-    # standard Resque workers don't maintain the persistent TCP connection.
-    extend Resque::Plugins::AccessWorkerFromJob
-    self.required_worker_class = 'APN::Sender'
   end
 end

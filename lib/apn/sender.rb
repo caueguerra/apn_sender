@@ -23,7 +23,7 @@ module APN
       self.socket.with do |s|
         s.write( notification.to_s )
       end
-    rescue SocketError => error
+    rescue SocketError, Errno::EPIPE => error
       log(:error, "Error with connection to #{apn_host} (attempt #{attempt}): #{error}")
 
       # Try reestablishing the connection
@@ -31,13 +31,13 @@ module APN
       setup_connection
       send_to_apple(notification, attempt + 1)
     end
-    
+
     protected
-    
+
     def apn_host
       @apn_host ||= apn_production? ? "gateway.push.apple.com" : "gateway.sandbox.push.apple.com"
     end
-    
+
     def apn_port
       2195
     end
